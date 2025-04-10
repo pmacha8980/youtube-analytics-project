@@ -4,6 +4,17 @@ USE DATABASE YOUTUBE_ANALYTICS;
 USE SCHEMA DWH;
 USE WAREHOUSE YOUTUBE_TRANSFORM_WH;
 
+
+/*1. TABLE(GENERATOR(ROWCOUNT => 1000)) creates a virtual table with 1000 rows
+2. SEQ4() generates a sequence of numbers for these rows
+3. ROW_NUMBER() OVER (ORDER BY SEQ4()) - 1 assigns a sequential number starting from 0 to each row
+4. This value is stored as seq
+This technique is creating a date dimension table with:
+• One row per day
+• Starting from the earliest date in your data
+• Extending for 1000 days
+• Including various date attributes (year, month, day, day of week, etc.)*/
+
 CREATE OR REPLACE TABLE DWH.DIM_DATE AS
 WITH date_range AS (
   SELECT 

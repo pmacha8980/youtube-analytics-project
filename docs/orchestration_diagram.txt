@@ -1,0 +1,185 @@
++------------------+     +------------------+     +------------------+
+|                  |     |                  |     |                  |
+|  External Stage  |     |  MONITOR_NEW_    |     |  RAW Tables     |
+|  CSV & JSON Files+---->+  FILES Task      +---->+  - VIDEOS       |
+|                  |     |  (Every 6 hours) |     |  - CATEGORIES   |
+|                  |     |                  |     |                  |
++------------------+     +------------------+     +--------+---------+
+                                                          |
+                                                          | Creates
+                                                          v
+                           +------------------+     +-----+------------+
+                           |                  |     |                  |
+                           |  VIDEO_STREAM    |     |  CATEGORY_STREAM |
+                           |  (Change Data    |     |  (Change Data    |
+                           |   Capture)       |     |   Capture)       |
+                           |                  |     |                  |
+                           +--------+---------+     +--------+---------+
+                                    |                        |
+                                    |                        |
+                           +--------v---------+     +--------v---------+
+                           |                  |     |                  |
+                           |  PROCESS_NEW_    |     |  PROCESS_NEW_    |
+                           |  VIDEOS Task     |     |  CATEGORIES Task |
+                           |                  |     |                  |
+                           |                  |     |                  |
+                           +--------+---------+     +--------+---------+
+                                    |                        |
+                                    |                        |
+                                    |        Feeds           |
+                                    v                        v
+                           +------------------+     +------------------+
+                           |                  |     |                  |
+                           |  STAGING Tables  |     |  STAGING_VIDEO_  |
+                           |  - VIDEOS        |     |  STREAM &        |
+                           |  - CATEGORIES    +---->+  STAGING_        |
+                           |                  |     |  CATEGORY_STREAM |
+                           +------------------+     +--------+---------+
+                                                            |
+                                                            |
+                                                   +--------v---------+
+                                                   |                  |
+                                                   |  UPDATE_         |
+                                                   |  DIMENSIONS Task |
+                                                   |                  |
+                                                   |                  |
+                                                   +--------+---------+
+                                                            |
+                                                            | Updates
+                                                            v
+                                                   +------------------+
+                                                   |                  |
+                                                   |  DWH Layer       |
+                                                   |  - DIM_VIDEO     |
+                                                   |  - DIM_CATEGORY  |
+                                                   |                  |
+                                                   +--------+---------+
+                                                            |
+                                                            |
+                                                   +--------v---------+
+                                                   |                  |
+                                                   |  UPDATE_FACT_    |
+                                                   |  TABLE Task      |
+                                                   |                  |
+                                                   |                  |
+                                                   +--------+---------+
+                                                            |
+                                                            | Updates
+                                                            v
+                                                   +------------------+
+                                                   |                  |
+                                                   |  FACT_VIDEO_     |
+                                                   |  STATS           |
+                                                   |                  |
+                                                   |                  |
+                                                   +--------+---------+
+                                                            |
+                                                            |
+                                                   +--------v---------+
+                                                   |                  |
+                                                   |  RUN_DATA_       |
+                                                   |  QUALITY Task    |
+                                                   |                  |
+                                                   |                  |
+                                                   +--------+---------+
+                                                            |
+                                                            | Populates
+                                                            v
+                                                   +------------------+
+                                                   |                  |
+                                                   |  DATA_QUALITY_   |
+                                                   |  RESULTS         |
+                                                   |                  |
+                                                   |                  |
+                                                   +------------------+
+
++----------------------------------------------------------+
+|                                                          |
+|                TASK DEPENDENCY GRAPH                     |
+|                                                          |
+|                MONITOR_NEW_FILES                         |
+|                       |                                  |
+|          +------------+------------+                     |
+|          |                         |                     |
+|   PROCESS_NEW_VIDEOS        PROCESS_NEW_CATEGORIES      |
+|          |                         |                     |
+|          +------------+------------+                     |
+|                       |                                  |
+|                UPDATE_DIMENSIONS                         |
+|                       |                                  |
+|                UPDATE_FACT_TABLE                         |
+|                       |                                  |
+|                RUN_DATA_QUALITY                          |
+|                                                          |
++----------------------------------------------------------+
+
+MONITOR_NEW_FILES (Root)
+├── PROCESS_NEW_VIDEOS
+├── PROCESS_NEW_CATEGORIES
+    └── UPDATE_DIMENSIONS
+        └── UPDATE_FACT_TABLE
+            └── RUN_DATA_QUALITY
+                └── REFRESH_ANALYTICS_VIEWS
+
+1. Root Task: MONITOR_NEW_FILES (scheduled task that checks for new files)
+  
+2. First Level Tasks (triggered after MONITOR_NEW_FILES):
+   • PROCESS_NEW_VIDEOS (processes new video data)
+   • PROCESS_NEW_CATEGORIES (processes new category data)
+  
+3. Second Level Task (triggered after both processing tasks):
+   • UPDATE_DIMENSIONS (updates dimension tables)
+  
+4. Third Level Task (triggered after dimension updates):
+   • UPDATE_FACT_TABLE (updates fact tables)
+  
+5. Fourth Level Task (triggered after fact table updates):
+   • RUN_DATA_QUALITY (runs data quality checks)
+  
+6. Fifth Level Task (triggered after data quality checks):
+   • REFRESH_ANALYTICS_VIEWS (refreshes materialized views)
+
+
+## Orchestration Components Explained
++    137: 
++    138: ### 1. MONITOR_NEW_FILES Task
++    139: 
++    140: - **Purpose**: Monitors for new data files in the external stage
++    141: - **Schedule**: Runs every 6 hours
++    142: - **Actions**:
++    143:   - Loads CSV files into RAW.VIDEOS
++    144:   - Loads JSON files into RAW.CATEGORIES
++    145:   - Logs execution in PIPELINE_LOG
++    146: 
++    147: ### 2. Streams for Change Data Capture
++    148: 
++    149: - **VIDEO_STREAM**: Tracks changes to RAW.VIDEOS
++    150: - **CATEGORY_STREAM**: Tracks changes to RAW.CATEGORIES
++    151: - **STAGING_VIDEO_STREAM**: Tracks changes to STAGING.VIDEOS
++    152: - **STAGING_CATEGORY_STREAM**: Tracks changes to STAGING.CATEGORIES
++    153: 
++    154: ### 3. Processing Tasks
++    155: 
++    156: - **PROCESS_NEW_VIDEOS**: Transforms raw video data into staging
++    157: - **PROCESS_NEW_CATEGORIES**: Transforms raw category data into staging
++    158: - **UPDATE_DIMENSIONS**: Updates dimension tables (DIM_VIDEO, DIM_CATEGORY)
++    159: - **UPDATE_FACT_TABLE**: Updates the fact table (FACT_VIDEO_STATS)
++    160: - **RUN_DATA_QUALITY**: Runs data quality checks
++    161: 
++    162: ## Benefits of This Architecture
++    163: 
++    164: 1. **Incremental Processing**: Only processes changed data
++    165: 2. **Automated Workflow**: Tasks run automatically based on schedule or dependencies
++    166: 3. **Error Handling**: Includes logging and error capture
++    167: 4. **Scalability**: Can handle growing data volumes
++    168: 5. **Maintainability**: Modular design with clear separation of concerns
++    169: 
++    170: ## Running the Orchestration
++    171: 
++    172: The orchestration can be set up by running the script:
++    173: ```sql
++    174: -- Run the orchestration setup script
++    175: snowsql -f scripts/orchestration/01_setup_orchestration.sql
++    176: ```
++    177: 
++    178: Once set up, the tasks will run automatically according to their schedule and dependencies.

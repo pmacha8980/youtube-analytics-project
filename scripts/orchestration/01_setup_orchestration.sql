@@ -1,4 +1,4 @@
--- YouTube Analytics Project - Setup Orchestration (Fixed)
+-- YouTube Analytics Project - Setup Orchestration
 
 USE DATABASE YOUTUBE_ANALYTICS;
 USE SCHEMA RAW;
@@ -11,7 +11,7 @@ CREATE OR REPLACE TASK RAW.MONITOR_NEW_FILES
 AS
 BEGIN
   -- Insert a log entry
-  INSERT INTO RAW.PIPELINE_LOG (PIPELINE_NAME, STEP_NAME, STATUS, RECORDS_PROCESSED, ERROR_MESSAGE)
+  INSERT INTO RAW.PIPELINE_LOG (PIPELINE_NAME, STEP_NAME, STATUS, ROW_COUNT, ERROR_MESSAGE)
   VALUES ('DATA_INGESTION', 'MONITOR_NEW_FILES', 'RUNNING', 0, NULL);
   
   -- Load new CSV files
@@ -47,12 +47,12 @@ BEGIN
   PATTERN = '.*_category_id\.json\.gz'
   ON_ERROR = 'CONTINUE'
   FORCE = FALSE;  -- Only load new files
-  
+  END;
   -- Reset file format to CSV
   ALTER STAGE YOUTUBE_EXTERNAL_STAGE SET FILE_FORMAT = RAW.CSV_FORMAT;
   
   -- Insert a log entry for completion
-  INSERT INTO RAW.PIPELINE_LOG (PIPELINE_NAME, STEP_NAME, STATUS, RECORDS_PROCESSED, ERROR_MESSAGE)
+  INSERT INTO RAW.PIPELINE_LOG (PIPELINE_NAME, STEP_NAME, STATUS, ROW_COUNT, ERROR_MESSAGE)
   SELECT 
     'DATA_INGESTION', 
     'MONITOR_NEW_FILES_COMPLETE', 
@@ -60,12 +60,14 @@ BEGIN
     COUNT(*), 
     NULL
   FROM RAW.VIDEOS;
-END;
 
 -- Create a stream to track changes in the raw videos table
 CREATE OR REPLACE STREAM RAW.VIDEO_STREAM ON TABLE RAW.VIDEOS;
 
--- Create a task in the RAW schema to process new data from raw to staging
+-- Create a stream to track changes in the raw categories table
+CREATE OR REPLACE STREAM RAW.CATEGORY_STREAM ON TABLE RAW.CATEGORIES;
+
+-- Create a task in the RAW schema to process new videos from raw to staging
 CREATE OR REPLACE TASK RAW.PROCESS_NEW_VIDEOS
   WAREHOUSE = YOUTUBE_TRANSFORM_WH
   AFTER RAW.MONITOR_NEW_FILES
@@ -136,13 +138,54 @@ WHEN NOT MATCHED THEN
     s.publish_date, s.publish_year, s.publish_month, s.publish_day
   );
 
+-- Create a task to process new categories from raw to staging
+CREATE OR REPLACE TASK RAW.PROCESS_NEW_CATEGORIES
+  WAREHOUSE = YOUTUBE_TRANSFORM_WH
+  AFTER RAW.MONITOR_NEW_FILES
+AS
+MERGE INTO STAGING.CATEGORIES t
+USING (
+  SELECT
+    c.value:id::INTEGER AS category_id,
+    c.value:snippet.title::STRING AS category_name,
+    c.value:snippet.assignable::BOOLEAN AS assignable,
+    --c.value:snippet.channelId::STRING AS channel_id,
+     c.value:etag::VARCHAR AS etag,
+    cs.source_file,
+   -- cs.load_timestamp
+    CURRENT_TIMESTAMP() AS load_timestamp
+  FROM RAW.CATEGORY_STREAM cs,
+  LATERAL FLATTEN(input => PARSE_JSON(cs.raw_json):items) c
+) s
+ON t.category_id = s.category_id
+WHEN MATCHED THEN
+  UPDATE SET
+    t.category_name = s.category_name,
+    t.assignable = s.assignable,
+    --t.channel_id = s.channel_id,
+     t.etag = s.etag,
+    t.source_file = s.source_file,
+    t.load_timestamp = s.load_timestamp
+WHEN NOT MATCHED THEN
+  INSERT (
+    --category_id, category_name, assignable, channel_id, source_file, load_timestamp
+    category_id, category_name, assignable, etag, source_file, load_timestamp
+  )
+  VALUES (
+   -- s.category_id, s.category_name, s.assignable, s.channel_id, s.source_file, s.load_timestamp
+    s.category_id, s.category_name, s.assignable, s.etag, s.source_file, s.load_timestamp
+  );
+
 -- Create a stream to track changes in the staging videos table
 CREATE OR REPLACE STREAM RAW.STAGING_VIDEO_STREAM ON TABLE STAGING.VIDEOS;
+
+-- Create a stream to track changes in the staging categories table
+CREATE OR REPLACE STREAM RAW.STAGING_CATEGORY_STREAM ON TABLE STAGING.CATEGORIES;
 
 -- Create a task to update dimension tables
 CREATE OR REPLACE TASK RAW.UPDATE_DIMENSIONS
   WAREHOUSE = YOUTUBE_TRANSFORM_WH
-  AFTER RAW.PROCESS_NEW_VIDEOS
+  AFTER RAW.PROCESS_NEW_VIDEOS, RAW.PROCESS_NEW_CATEGORIES
 AS
 BEGIN
   -- Update video dimension
@@ -213,6 +256,57 @@ BEGIN
       SELECT 1 FROM DWH.DIM_VIDEO
       WHERE video_id = s.video_id AND is_current = TRUE
     );
+    
+  -- Update category dimension
+  MERGE INTO DWH.DIM_CATEGORY t
+  USING (
+    SELECT
+      category_id,
+      category_name,
+      assignable,
+      --channel_id,
+      etag,
+      source_file,
+      load_timestamp
+    FROM RAW.STAGING_CATEGORY_STREAM
+  ) s
+  ON t.category_id = s.category_id AND t.is_current = TRUE
+  WHEN MATCHED AND (
+    t.category_name != s.category_name OR
+    t.assignable != s.assignable OR
+    --t.channel_id != s.channel_id
+    t.etag != s.etag
+
+  ) THEN
+    UPDATE SET is_current = FALSE
+  WHEN NOT MATCHED THEN
+    INSERT (
+      --category_id, category_name, assignable, channel_id,
+      category_id, category_name, assignable, etag,
+      source_file, load_timestamp, version, is_current
+    )
+    VALUES (
+      --s.category_id, s.category_name, s.assignable, s.channel_id,
+       s.category_id, s.category_name, s.assignable, s.etag,
+      s.source_file, s.load_timestamp, 1, TRUE
+    );
+    
+  -- Insert new versions of updated category records
+  INSERT INTO DWH.DIM_CATEGORY (
+    category_id, category_name, assignable, etag,
+    source_file, load_timestamp, version, is_current
+  )
+  SELECT
+    s.category_id, s.category_name, s.assignable, s.etag,
+    s.source_file, s.load_timestamp, t.version + 1, TRUE
+  FROM RAW.STAGING_CATEGORY_STREAM s
+  JOIN DWH.DIM_CATEGORY t
+    ON t.category_id = s.category_id
+    AND t.is_current = FALSE
+    AND NOT EXISTS (
+      SELECT 1 FROM DWH.DIM_CATEGORY
+      WHERE category_id = s.category_id AND is_current = TRUE
+    );
 END;
 
 -- Create a task to update the fact table
@@ -266,5 +360,24 @@ CALL RAW.RUN_DATA_QUALITY_CHECKS();
 ALTER TASK RAW.RUN_DATA_QUALITY RESUME;
 ALTER TASK RAW.UPDATE_FACT_TABLE RESUME;
 ALTER TASK RAW.UPDATE_DIMENSIONS RESUME;
+ALTER TASK RAW.PROCESS_NEW_CATEGORIES RESUME;
 ALTER TASK RAW.PROCESS_NEW_VIDEOS RESUME;
 ALTER TASK RAW.MONITOR_NEW_FILES RESUME;
+
+
+-- Create a task to refresh analytics views
+CREATE OR REPLACE TASK RAW.REFRESH_ANALYTICS_VIEWS
+  WAREHOUSE = YOUTUBE_ANALYTICS_WH
+  AFTER RAW.RUN_DATA_QUALITY
+AS
+BEGIN
+  -- Refresh materialized views
+  ALTER MATERIALIZED VIEW ANALYTICS.DAILY_VIDEO_METRICS REFRESH;
+  
+  -- Log completion
+  INSERT INTO RAW.PIPELINE_LOG (PIPELINE_NAME, STEP_NAME, STATUS, ROW_COUNT, ERROR_MESSAGE)
+  VALUES ('ANALYTICS_REFRESH', 'REFRESH_VIEWS', 'SUCCESS', 0, NULL);
+END;
+
+-- Enable the new task
+ALTER TASK RAW.REFRESH_ANALYTICS_VIEWS RESUME;

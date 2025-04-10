@@ -4,12 +4,7 @@ This project implements an end-to-end data solution for YouTube video statistics
 
 ## Architecture Overview
 
-The project follows an ELT (Extract, Load, Transform) approach with all processing happening within Snowflake:
-
-- **Data Ingestion**: Initial data load into Snowflake with simulation of daily feeds
-- **Transformation**: Multi-layer data model (Raw → Staging → Dimensional)
-- **Analytics**: Materialized views for business insights
-- **Orchestration**: Automated pipeline using Snowflake tasks
+The project follows an ELT (Extract, Load, Transform) approach with automated data ingestion using Snowpipe.
 
 ## Project Structure
 
@@ -19,7 +14,8 @@ youtube_analytics_project/
 │   ├── setup/               # Initial setup scripts
 │   │   ├── 01_create_environment.sql
 │   │   ├── 02_create_environments.sql
-│   │   └── 03_setup_data_simulation.sql
+│   │   └── 03_setup_snowpipe.sql
+│   ├── ingestion/           # Data loading scripts
 │   ├── transformation/      # Data modeling scripts
 │   │   ├── 01_create_staging_tables.sql
 │   │   └── 02_create_dimension_tables.sql
@@ -33,15 +29,16 @@ youtube_analytics_project/
 ├── docs/                    # Documentation and diagrams
 │   ├── architecture.md      # Architecture overview
 │   └── orchestration_diagram.txt  # Orchestration diagram
-└── data/                    # Sample data files
+├── deployment/              # Deployment scripts
+└── data/                    # Sample data and utilities
 
 ## Getting Started
 
 ### Prerequisites
 
-1. Snowflake account with appropriate privileges
+1. Snowflake account with ACCOUNTADMIN privileges
 2. SnowSQL CLI installed
-3. Sample YouTube data files
+3. Cloud storage account (AWS S3, Azure Blob Storage, or GCP Cloud Storage)
 
 ### Setup Instructions
 
@@ -56,20 +53,35 @@ snowsql -f scripts/setup/02_create_environments.sql
 
 #### 2. Data Ingestion Setup
 
-For the lab demonstration, you can manually upload files to Snowflake:
+For the lab demonstration, manually uploaded files to the Snowflake stage:
 
 bash
-# Upload sample data files to Snowflake
-snowsql -c my_connection -q "PUT file:///path/to/videos.csv @YOUTUBE_EXTERNAL_STAGE AUTO_COMPRESS=TRUE"
-snowsql -c my_connection -q "PUT file:///path/to/category_id.json @YOUTUBE_EXTERNAL_STAGE AUTO_COMPRESS=TRUE"
+# Upload sample data files to Snowflake stage
+snowsql -c my_connection -q "PUT file:///path/to/videos.csv @YOUTUBE_EXTERNAL_STAGE/videos/ AUTO_COMPRESS=TRUE"
+snowsql -c my_connection -q "PUT file:///path/to/category_id.json @YOUTUBE_EXTERNAL_STAGE/categories/ AUTO_COMPRESS=
+TRUE"
 
-Set up data simulation for daily feeds:
+For production use with daily data feeds, set up Snowpipe:
 
 bash
-# Set up data simulation
-snowsql -f scripts/setup/03_setup_data_simulation.sql
+# Set up Snowpipe for automated ingestion
+snowsql -f scripts/setup/03_setup_snowpipe.sql
+
+After running this script, you'll need to configure your cloud storage:
+
+1. Get the Snowpipe notification channel:
+   bash
+  snowsql -c my_connection -q "SHOW PIPES IN DATABASE YOUTUBE_ANALYTICS"
+  
+
+
+2. Configure cloud storage event notifications:
+   - For AWS S3: Set up S3 event notifications to the Snowpipe SQS queue
+   - For Azure: Configure Event Grid notifications
+   - For GCP: Set up Cloud Storage notifications
 
 #### 3. Create Transformation Layer
+
 
 bash
 # Create staging tables
@@ -101,17 +113,20 @@ The project uses a star schema design:
 
 ## Automated Data Pipeline
 
-The data pipeline is fully automated using Snowflake tasks:
+The data pipeline is fully automated using Snowflake tasks and Snowpipe:
 
-1. **Data Ingestion**: Simulated daily data feeds
-2. **Transformation**: Data flows through staging to dimensional model
-3. **Analytics**: Materialized views are automatically refreshed
+1. **Data Ingestion**: Files uploaded to cloud storage are automatically loaded via Snowpipe
+2. **Transformation**: Snowflake tasks process the data through staging to the dimensional model
+3. **Analytics**: Materialized views are automatically refreshed for reporting
 
 ## Monitoring and Maintenance
 
 Monitor the pipeline using:
 
 sql
+-- Check Snowpipe status
+SELECT  FROM TABLE(INFORMATIONSCHEMA.PIPE_USAGE_HISTORY());
+
 -- Check task execution history
 SELECT  FROM TABLE(INFORMATIONSCHEMA.TASK_HISTORY());
 
@@ -122,7 +137,7 @@ SELECT  FROM RAW.PIPELINELOG ORDER BY TIMESTAMP DESC LIMIT 100;
 
 This architecture is designed to scale for production use:
 
-- **Cloud Storage Integration**: For production, external stages with cloud storage (AWS S3, Azure Blob, GCP) would be used
-- **Snowpipe**: For automated ingestion of files from cloud storage
-- **Streams**: For incremental processing of changed data
-- **Resource Optimization**: Separate warehouses for different workloads
+- **Snowpipe** handles large volumes of incoming data
+- **Streams** enable incremental processing
+- **Tasks** automate the entire pipeline
+- **Materialized Views** provide efficient analytics
